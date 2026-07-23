@@ -5,6 +5,7 @@
 #include <ElegantOTA.h>
 #include <Webpage.h>
 #include <FastLED.h>
+#include "embedded_html.h"
 
 // Ustawienia diod LED
 #define NUM_LEDS 1        // Liczba diod w pasku/pierścieniu
@@ -100,39 +101,41 @@ void setup() {
   Serial.begin(9600);
   initWiFi();
 
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html", INDEX_HTML);
+  });
   server.on("/g;(n3", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", page.buildWebpage(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter));
-    Serial.println("server.on('/g;(n3'");
+    request->send(200, "text/html", INDEX_HTML);
+  });
+  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
+    request->send(200, "application/json", String(json.c_str()));
+  });
+  server.on("/g;(n3WLACZ", HTTP_GET, [](AsyncWebServerRequest *request) {
+    digitalWrite(RELAY_PIN, HIGH);
+    leds[0] = CRGB(0, 255, 0);
+    FastLED.show();
+    previousMillis = currentMillis;
+    isOn = true;
+    automatic = false;
+    std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
+    request->send(200, "application/json", String(json.c_str()));
   });
   server.on("/g;(n3WYLACZ", HTTP_GET, [](AsyncWebServerRequest *request) {
     previousMillis = currentMillis;
     digitalWrite(RELAY_PIN, LOW);
-    leds[0] = CRGB(255, 0, 0); 
-    FastLED.show(); 
+    leds[0] = CRGB(255, 0, 0);
+    FastLED.show();
     isOn = false;
     automatic = false;
-    request->send(200, "text/html", page.buildWebpage(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter));
-    Serial.println("/g;(n3WYLACZ");
-  });
-  server.on("/g;(n3WLACZ", HTTP_GET, [](AsyncWebServerRequest *request) {
-    digitalWrite(RELAY_PIN, HIGH);
-    leds[0] = CRGB(0, 255, 0); 
-    FastLED.show(); 
-    previousMillis = currentMillis;
-    isOn = true;
-    automatic = false;
-    request->send(200, "text/html", page.buildWebpage(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter));
-    Serial.println("/g;(n3WLACZ");
+    std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
+    request->send(200, "application/json", String(json.c_str()));
   });
   server.on("/g;(n3AUTOMATYCZNY", HTTP_GET, [](AsyncWebServerRequest *request) {
     previousMillis = 0UL;
     automatic = true;
-    request->send(200, "text/html", page.buildWebpage(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter));
-    Serial.println("/g;(n3AUTOMATYCZNY");
-  });
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", page.buildWebpage(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter));
-    Serial.println("/");
+    std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
+    request->send(200, "application/json", String(json.c_str()));
   });
   server.begin();
 
