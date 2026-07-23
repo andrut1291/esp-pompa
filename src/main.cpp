@@ -22,17 +22,16 @@ const char* password = "H28V254H84";
 
 const int SIZE = 15;
 const int RELAY_PIN = 3;     // the Arduino pin, which connects to the IN pin of relay
-const int analogInPin = 1;  // Analog input pin that the potentiometer is attached to
 bool automatic = true;
-unsigned long previousMillis;
-unsigned long currentMillis;
+unsigned long previousMillis = 0;
+unsigned long currentMillis = 0;
 bool isOn = false;
 int sensorValue = 0;  // value read from the pot
 const unsigned long goAutomaticAfter = 900000;
 float voltageSum = 0;
 float avgVoltage = 0;
 float level = 0;
-float voltages[SIZE];
+float voltages[SIZE] = {0};
 int i = 0;
 Webpage page = Webpage();
 
