@@ -1,32 +1,43 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ElegantOTA.h>
 #include <Webpage.h>
 #include <FastLED.h>
+#include <Preferences.h>
 #include "embedded_html.h"
 
-// Ustawienia diod LED
-#define NUM_LEDS 1        // Liczba diod w pasku/pierścieniu
-#define DATA_PIN 48       // Pin GPIO, do którego podłączono linię danych DIN
-#define LED_TYPE WS2812B  // Typ diody LED
-#define COLOR_ORDER GRB   // Kolejność kolorów (zależy od producenta)
+#define NUM_LEDS 1
+#define DATA_PIN 48
+#define LED_TYPE WS2812B
+#define COLOR_ORDER GRB
 
-// Definiowanie tablicy diod
 CRGB leds[NUM_LEDS];
 
-// Replace with your network credentials
-const char* ssid = "ZTE_34FC8B";
-const char* password = "H28V254H84";
+#define BOOT_BUTTON_PIN 0
+#define DEBOUNCE_MS 30
+#define AP_SSID "ESP-Pompa / 192.168.4.1"
+#define WIFI_TIMEOUT_MS 10000
+
+bool configPortalActive = false;
+bool connectingToWifi = false;
+unsigned long connectStartTime = 0;
+Preferences preferences;
+
+unsigned long lastPressTime = 0;
+bool lastButtonReading = HIGH;
+bool buttonState = HIGH;
+unsigned long lastDebounceTime = 0;
 
 const int SIZE = 15;
-const int RELAY_PIN = 3;     // the Arduino pin, which connects to the IN pin of relay
+const int RELAY_PIN = 3;
 bool automatic = true;
 unsigned long previousMillis = 0;
 unsigned long currentMillis = 0;
 bool isOn = false;
-int sensorValue = 0;  // value read from the pot
 const unsigned long goAutomaticAfter = 900000;
 float voltageSum = 0;
 float avgVoltage = 0;
@@ -35,19 +46,69 @@ float voltages[SIZE] = {0};
 int i = 0;
 Webpage page = Webpage();
 
-// Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
+DNSServer dnsServer;
 
-// Initialize WiFi
+static const IPAddress apIP(192, 168, 4, 1);
+static const IPAddress subnet(255, 255, 255, 0);
+
+void saveWifiCreds(const String& ssid, const String& pass) {
+  preferences.begin("wifi", false);
+  preferences.putString("ssid", ssid);
+  preferences.putString("pass", pass);
+  preferences.end();
+}
+
+void clearWifiCreds() {
+  preferences.begin("wifi", false);
+  preferences.remove("ssid");
+  preferences.remove("pass");
+  preferences.end();
+}
+
+String getSavedSsid() {
+  preferences.begin("wifi", true);
+  String s = preferences.getString("ssid", "");
+  preferences.end();
+  return s;
+}
+
+String getSavedPass() {
+  preferences.begin("wifi", true);
+  String p = preferences.getString("pass", "");
+  preferences.end();
+  return p;
+}
+
 void initWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi ..");
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print('.');
-    delay(1000);
+  String ssid = getSavedSsid();
+  String pass = getSavedPass();
+
+  if (ssid.length() > 0) {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
+      delay(100);
+    }
   }
-  Serial.println(WiFi.localIP());
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(WiFi.localIP());
+    MDNS.begin("pompa");
+  } else {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAPConfig(apIP, apIP, subnet);
+    WiFi.softAP(AP_SSID);
+    delay(100);
+    MDNS.begin("pompa");
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer.start(53, "*", apIP);
+    configPortalActive = true;
+    Serial.print("AP mode: ESP-Pompa @ ");
+    Serial.println(apIP);
+  }
 }
 
 void handleAnalogReading() {
@@ -87,24 +148,68 @@ void handleAutomaticMode() {
   }
 }
 
+void handleBootButton() {
+  unsigned long now = millis();
+  bool reading = digitalRead(BOOT_BUTTON_PIN);
+
+  if (reading != lastButtonReading) {
+    lastDebounceTime = now;
+  }
+
+  if ((now - lastDebounceTime) > DEBOUNCE_MS) {
+    if (reading != buttonState) {
+      buttonState = reading;
+      if (buttonState == LOW) {
+        lastPressTime = now;
+      }
+    }
+
+    if (buttonState == LOW && lastPressTime > 0 && (now - lastPressTime) >= 4000) {
+      clearWifiCreds();
+      leds[0] = CRGB(255, 0, 0);
+      FastLED.show();
+      delay(200);
+      ESP.restart();
+    }
+  }
+  lastButtonReading = reading;
+}
+
+void handleBlueBlink() {
+  static unsigned long ledTimer = 0;
+  if (currentMillis - ledTimer > 500) {
+    if (leds[0] == CRGB(0, 0, 255)) {
+      leds[0] = CRGB(0, 0, 0);
+    } else {
+      leds[0] = CRGB(0, 0, 255);
+    }
+    FastLED.show();
+    ledTimer = currentMillis;
+  }
+}
+
 void setup() {
-  // Inicjalizacja biblioteki FastLED
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
-  
-  // Ustawienie jasności diod
   FastLED.setBrightness(50);
   pinMode(RELAY_PIN, OUTPUT);
   leds[0] = CRGB(255, 0, 0); 
   FastLED.show(); 
 
   Serial.begin(9600);
+
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+    clearWifiCreds();
+    delay(100);
+  }
+
   initWiFi();
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", INDEX_HTML);
+    request->send(200, "text/html; charset=utf-8", INDEX_HTML);
   });
   server.on("/g;(n3", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", INDEX_HTML);
+    request->send(200, "text/html; charset=utf-8", INDEX_HTML);
   });
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
@@ -136,14 +241,112 @@ void setup() {
     std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
     request->send(200, "application/json", String(json.c_str()));
   });
+  server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+    static bool scanActive = false;
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) {
+      request->send(200, "application/json", "{\"status\":\"scanning\"}");
+      return;
+    }
+    if (n >= 0 && scanActive) {
+      scanActive = false;
+      String json = "{\"status\":\"done\",\"networks\":[";
+      for (int i = 0; i < n; i++) {
+        if (i > 0) json += ",";
+        String ssid = WiFi.SSID(i);
+        ssid.replace("\\", "\\\\");
+        ssid.replace("\"", "\\\"");
+        json += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + WiFi.RSSI(i) + "}";
+      }
+      json += "]}";
+      WiFi.scanDelete();
+      request->send(200, "application/json", json);
+      return;
+    }
+    scanActive = true;
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_AP_STA);
+    delay(50);
+    WiFi.scanNetworks(true);
+    request->send(200, "application/json", "{\"status\":\"scanning\"}");
+  });
+  server.on("/api/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {
+    String ssid = request->arg("ssid");
+    String pass = request->arg("password");
+    if (ssid.length() > 0) {
+      saveWifiCreds(ssid, pass);
+      request->send(200, "application/json", "{\"status\":\"ok\"}");
+      WiFi.disconnect();
+      WiFi.mode(WIFI_AP_STA);
+      delay(50);
+      WiFi.begin(ssid.c_str(), pass.c_str());
+      connectingToWifi = true;
+      connectStartTime = millis();
+    } else {
+      request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"SSID required\"}");
+    }
+  });
+  server.on("/api/wifi/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String savedSsid = getSavedSsid();
+    String json = "{\"configured\":" + String(savedSsid.length() > 0 ? "true" : "false") +
+                  ",\"ssid\":\"" + savedSsid + "\"" +
+                  ",\"connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") +
+                  ",\"ip\":\"" + WiFi.localIP().toString() + "\"" +
+                  ",\"connecting\":" + String(connectingToWifi ? "true" : "false") + "}";
+    request->send(200, "application/json", json);
+  });
+  server.on("/api/wifi/disable-ap", HTTP_POST, [](AsyncWebServerRequest *request) {
+    WiFi.softAPdisconnect(true);
+    dnsServer.stop();
+    request->send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    if (configPortalActive) {
+      request->redirect("http://192.168.4.1/");
+    } else {
+      request->send(404, "text/plain", "Not found");
+    }
+  });
+
   server.begin();
 
-  ElegantOTA.begin(&server, "admin", "admin");    // Start ElegantOTA
+  ElegantOTA.begin(&server, "admin", "admin");
 }
 
 void loop() {
   ElegantOTA.loop();
   currentMillis = millis();
+
+  handleBootButton();
+
+  if (configPortalActive) {
+    dnsServer.processNextRequest();
+    handleBlueBlink();
+
+    if (connectingToWifi) {
+      wl_status_t status = WiFi.status();
+      if (status == WL_CONNECTED) {
+        connectingToWifi = false;
+        MDNS.begin("pompa");
+        WiFi.softAPdisconnect(true);
+        dnsServer.stop();
+        WiFi.mode(WIFI_STA);
+        configPortalActive = false;
+      } else if (status == WL_CONNECT_FAILED || millis() - connectStartTime > WIFI_TIMEOUT_MS) {
+        connectingToWifi = false;
+        WiFi.mode(WIFI_AP);
+        WiFi.softAPConfig(apIP, apIP, subnet);
+        WiFi.softAP(AP_SSID);
+        delay(100);
+        MDNS.begin("pompa");
+        dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+        dnsServer.start(53, "*", apIP);
+      }
+    }
+
+    return;
+  }
+
   handleAnalogReading();
   handleAutomaticMode();
 }

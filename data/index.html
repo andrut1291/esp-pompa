@@ -1,5 +1,6 @@
 <html>
 <head>
+<meta charset="utf-8">
 <script type='text/javascript'>
 let intervalId;
 let uptimeCount = 0;
@@ -41,7 +42,7 @@ function updateUptime() {
 }
 
 function updateUI(data) {
-   document.getElementById('state').textContent = data.isOn ? 'Obecny stan - zalaczony' : 'Obecny stan - wylaczony';
+    document.getElementById('state').textContent = data.isOn ? 'Obecny stan - załączony' : 'Obecny stan - wyłączony';
    document.getElementById('mode').textContent = data.automatic ? 'Tryb pracy automatyczny' : 'Tryb pracy manualny';
    document.getElementById('level').innerHTML = 'Poziom wody ' + data.level + ' cm';
    document.getElementById('water').style.height = data.perc + '%';
@@ -65,6 +66,171 @@ async function getAction(a) {
    } catch (e) {}
 }
 
+async function fetchWifiStatus() {
+   try {
+       const r = await fetch('/api/wifi/status');
+       if (r.ok) {
+           const data = await r.json();
+           if (data.configured && data.connected) {
+               document.getElementById('main-content').style.display = 'block';
+               document.getElementById('wifi-config').style.display = 'none';
+           } else {
+               document.getElementById('main-content').style.display = 'none';
+               document.getElementById('wifi-config').style.display = 'block';
+               document.getElementById('wifi-ap-name').textContent = 'ESP-Pompa';
+               scanNetworks();
+           }
+       }
+   } catch (e) {}
+}
+
+async function scanNetworks(retry) {
+   const select = document.getElementById('wifi-ssid-select');
+   const manualGroup = document.getElementById('wifi-manual-group');
+   const manualInput = document.getElementById('wifi-ssid-manual');
+   const spinner = document.getElementById('wifi-scan-spinner');
+   const retryBtn = document.getElementById('wifi-scan-retry');
+   select.innerHTML = '<option value="">Skanowanie...</option>';
+   select.disabled = true;
+   spinner.style.display = 'flex';
+   retryBtn.style.display = 'none';
+   retry = retry || 0;
+   try {
+       const r = await fetch('/api/wifi/scan');
+       if (r.ok) {
+           const data = await r.json();
+           if (data.status === 'scanning') {
+               if (retry < 10) {
+                   setTimeout(() => scanNetworks(retry + 1), 1000);
+               } else {
+                    select.innerHTML = '<option value="">Skanowanie trwa zbyt długo</option>';
+                    spinner.style.display = 'none';
+                    select.disabled = false;
+                    retryBtn.style.display = 'block';
+                    manualGroup.style.display = 'block';
+                    manualInput.required = true;
+               }
+               return;
+           }
+            spinner.style.display = 'none';
+            select.innerHTML = '<option value="">-- Wybierz sieć --</option>';
+           const seen = new Set();
+           if (data.networks) {
+               data.networks.sort((a, b) => b.rssi - a.rssi);
+               for (const net of data.networks) {
+                   if (net.ssid === '' || seen.has(net.ssid)) continue;
+                   seen.add(net.ssid);
+                   const opt = document.createElement('option');
+                   opt.value = net.ssid;
+                   opt.textContent = net.ssid + ' (' + net.rssi + ' dBm)';
+                   select.appendChild(opt);
+               }
+           }
+           const other = document.createElement('option');
+           other.value = '__other__';
+           other.textContent = 'Inna...';
+           select.appendChild(other);
+           select.disabled = false;
+       }
+   } catch (e) {
+        select.innerHTML = '<option value="">Błąd skanowania</option>';
+        spinner.style.display = 'none';
+        select.disabled = false;
+        retryBtn.style.display = 'block';
+        manualGroup.style.display = 'block';
+        manualInput.required = true;
+   }
+   select.onchange = () => {
+       if (select.value === '__other__') {
+           manualGroup.style.display = 'block';
+           manualInput.required = true;
+           select.style.display = 'none';
+       }
+   };
+}
+
+function showSelectAgain() {
+   document.getElementById('wifi-ssid-select').style.display = '';
+   document.getElementById('wifi-manual-group').style.display = 'none';
+   document.getElementById('wifi-ssid-manual').required = false;
+   document.getElementById('wifi-ssid-select').value = '';
+}
+
+async function submitWifi(event) {
+   event.preventDefault();
+   const select = document.getElementById('wifi-ssid-select');
+   const manualInput = document.getElementById('wifi-ssid-manual');
+   const ssid = select.value === '__other__' ? manualInput.value : select.value;
+   const password = document.getElementById('wifi-password').value;
+   const btn = document.getElementById('wifi-btn');
+   btn.disabled = true;
+   btn.textContent = 'Zapisywanie...';
+   try {
+       const r = await fetch('/api/wifi', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+           body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password)
+       });
+       if (r.ok) {
+           document.getElementById('wifi-config').innerHTML =
+               '<div class="card">' +
+               '<h3 style="margin-top:0">Łączenie z siecią <b>' + ssid + '</b>...</h3>' +
+               '<p class="sub" id="conn-status">Trwa łączenie, proszę czekać</p>' +
+               '<div style="margin:16px 0;display:flex;justify-content:center">' +
+               '<div style="width:32px;height:32px;border:3px solid #ddd;border-top:3px solid #007aff;border-radius:50%;animation:spin 1s linear infinite"></div>' +
+               '</div>' +
+               '</div>';
+           checkWifiConnection(ssid, 0);
+       }
+   } catch (e) {
+       btn.disabled = false;
+       btn.textContent = 'Błąd - spróbuj ponownie';
+   }
+}
+
+async function checkWifiConnection(ssid, attempt) {
+   if (attempt > 15) {
+       document.getElementById('conn-status').textContent = 'Nie udało się połączyć. Spróbuj ponownie.';
+       return;
+   }
+   await new Promise(r => setTimeout(r, 1000));
+   try {
+       const r = await fetch('/api/wifi/status');
+       if (r.ok) {
+           const data = await r.json();
+           if (data.connecting) {
+               document.getElementById('conn-status').textContent = 'Łączenie... (' + (attempt + 1) + 's)';
+               checkWifiConnection(ssid, attempt + 1);
+            } else if (data.connected) {
+                fetch('/api/wifi/disable-ap', { method: 'POST' }).catch(() => {});
+                let countdown = 10;
+                document.getElementById('wifi-config').innerHTML =
+                    '<div class="card">' +
+                    '<h3 style="color:#28a745;margin-top:0;margin-bottom:8px">Połączono!</h3>' +
+                    '<p class="sub" style="margin-bottom:16px">Urządzenie jest podłączone do sieci <b>' + ssid + '</b>.</p>' +
+                    '<p style="font-size:2em;font-weight:bold;margin:0;color:#007aff" id="redirect-countdown">' + countdown + '</p>' +
+                    '<p class="sub" style="margin:4px 0 16px 0">Przekierowanie do panelu...</p>' +
+                    '<p style="margin:0">lub kliknij:</p>' +
+                    '<a href="http://pompa.local" style="display:inline-block;margin:12px 0;padding:14px 24px;background:#007aff;color:white;text-decoration:none;border-radius:10px;font-weight:600;font-size:1.1em">http://pompa.local</a>' +
+                    '</div>';
+                const timer = setInterval(() => {
+                    countdown--;
+                    document.getElementById('redirect-countdown').textContent = countdown;
+                    if (countdown <= 0) {
+                        clearInterval(timer);
+                        window.location.href = 'http://pompa.local';
+                    }
+                }, 1000);
+            } else {
+               document.getElementById('conn-status').textContent = 'Błąd połączenia. Spróbuj ponownie.';
+           }
+       }
+   } catch (e) {
+       document.getElementById('conn-status').textContent = 'Sprawdzanie połączenia...';
+       checkWifiConnection(ssid, attempt + 1);
+   }
+}
+
 (function () {
    window.onload = () => {
        if (document.location.hash.substring(1) === '') {
@@ -74,14 +240,16 @@ async function getAction(a) {
        setInterval(updateUptime, 1000);
        fetchStatus();
        setInterval(fetchStatus, 5000);
+       fetchWifiStatus();
    };
 })();
 </script>
 </head>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/purecss@3.0.0/build/pure-min.css" integrity="sha384-X38yfunGUhNzHpBaEBsWLO+A0HDYOQi8ufWDkZ0k9e0eXz/tH3II7uKZ9msv++Ls" crossorigin="anonymous">
 <style>
-body { text-align: center; }
+body { text-align: center; margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
 .button-success, .button-error, .button-secondary { color: white; border-radius: 4px; text-shadow: 0 1px 1px rgba(0, 0, 0, 0.2); }
+#main-content { max-width: 400px; margin: 0 auto; display: none; }
 .tank {
    width: 150px; height: 200px; border: 2px solid black; border-top: none;
    background: white; position: relative; display: inline-block;
@@ -112,9 +280,37 @@ body { text-align: center; }
    background-color: rgba(255, 255, 255, 1);
    animation-duration: 7s; animation-direction: reverse; z-index: 9;
 }
+#wifi-config { margin: 0 auto; max-width: 420px; }
+#wifi-config .card {
+   background: white; border-radius: 16px; padding: 28px 24px;
+   box-shadow: 0 2px 12px rgba(0,0,0,0.1); text-align: center;
+}
+#wifi-config h3 { margin: 0 0 8px 0; font-size: 1.4em; }
+#wifi-config .sub { color: #666; font-size: 0.95em; margin: 0 0 20px 0; line-height: 1.4; }
+#wifi-config .sub b { color: #333; }
+#wifi-config select, #wifi-config input {
+   width: 100%; margin: 6px 0; padding: 12px; box-sizing: border-box;
+   border: 1px solid #ccc; border-radius: 10px; font-size: 1em;
+   background: #fff; -webkit-appearance: none; appearance: none;
+}
+#wifi-config select {
+   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23666' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+   background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px;
+}
+#wifi-config .btn-primary {
+   width: 100%; padding: 14px; margin: 12px 0 0 0; border: none; border-radius: 10px;
+   background: #007aff; color: white; font-size: 1.05em; font-weight: 600; cursor: pointer;
+}
+#wifi-config .btn-primary:disabled { background: #999; cursor: default; }
+#wifi-config .btn-secondary {
+   padding: 8px 16px; border: 1px solid #ccc; border-radius: 8px;
+   background: white; color: #333; font-size: 0.9em; cursor: pointer; margin: 4px 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<h2 id='state'>Obecny stan - wylaczony</h2>
+<div id="main-content">
+<h2 id='state'>Obecny stan - wyłączony</h2>
 <h2 id='mode'>Tryb pracy automatyczny</h2>
 <h1 id='level'>Poziom wody 0 cm</h1>
 <div class="tank"><div id="water" class="water" style="height: 0%;"><div id="perc" class="perc">0%</div></div></div>
@@ -127,4 +323,27 @@ body { text-align: center; }
 <span style="display: none" id="uptime-in-sec">0</span>
 <span style="display: none" id="auto-in-sec">0</span>
 <p id='auto-in'></p>
+</div>
+<div id="wifi-config">
+<div class="card">
+<h3>Konfiguracja WiFi</h3>
+<p class="sub">Połącz się z siecią <b id="wifi-ap-name">ESP-Pompa</b>, a następnie wybierz swoją sieć WiFi:</p>
+<form onsubmit="submitWifi(event)">
+<select id="wifi-ssid-select" required>
+<option value="">-- Wybierz sieć --</option>
+</select>
+<div id="wifi-scan-spinner" style="display:none;margin:8px 0;flex-direction:column;align-items:center;gap:8px">
+<div style="width:24px;height:24px;border:3px solid #ddd;border-top:3px solid #007aff;border-radius:50%;animation:spin 1s linear infinite"></div>
+<span style="font-size:0.9em;color:#666">Skanowanie sieci...</span>
+</div>
+<button id="wifi-scan-retry" type="button" class="btn-secondary" style="display:none;margin:8px auto" onclick="scanNetworks()">Skanuj ponownie</button>
+<div id="wifi-manual-group" style="display:none">
+<input id="wifi-ssid-manual" type="text" placeholder="Nazwa sieci WiFi (SSID)">
+<button type="button" class="btn-secondary" onclick="showSelectAgain()">Wróć do listy</button>
+</div>
+<input id="wifi-password" type="password" placeholder="Hasło WiFi">
+<button id="wifi-btn" class="btn-primary" type="submit">Zapisz i uruchom ponownie</button>
+</form>
+</div>
+</div>
 </html>
