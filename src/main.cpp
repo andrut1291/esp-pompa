@@ -25,6 +25,7 @@ CRGB leds[NUM_LEDS];
 bool configPortalActive = false;
 bool connectingToWifi = false;
 unsigned long connectStartTime = 0;
+unsigned long apShutdownTime = 0;
 Preferences preferences;
 
 unsigned long lastPressTime = 0;
@@ -78,6 +79,19 @@ String getSavedPass() {
   String p = preferences.getString("pass", "");
   preferences.end();
   return p;
+}
+
+String getAuthPassword() {
+  preferences.begin("app", true);
+  String p = preferences.getString("auth_pass", "admin");
+  preferences.end();
+  return p;
+}
+
+void setAuthPassword(const String& pw) {
+  preferences.begin("app", false);
+  preferences.putString("auth_pass", pw);
+  preferences.end();
 }
 
 void initWiFi() {
@@ -208,36 +222,41 @@ void setup() {
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html; charset=utf-8", INDEX_HTML);
   });
-  server.on("/g;(n3", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html; charset=utf-8", INDEX_HTML);
-  });
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
     request->send(200, "application/json", String(json.c_str()));
   });
-  server.on("/g;(n3WLACZ", HTTP_GET, [](AsyncWebServerRequest *request) {
-    digitalWrite(RELAY_PIN, HIGH);
-    leds[0] = CRGB(0, 255, 0);
-    FastLED.show();
-    previousMillis = currentMillis;
-    isOn = true;
-    automatic = false;
-    std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
-    request->send(200, "application/json", String(json.c_str()));
+  server.on("/api/auth", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (request->arg("password") == getAuthPassword()) {
+      request->send(200, "application/json", "{\"status\":\"ok\"}");
+    } else {
+      request->send(401, "application/json", "{\"status\":\"error\"}");
+    }
   });
-  server.on("/g;(n3WYLACZ", HTTP_GET, [](AsyncWebServerRequest *request) {
-    previousMillis = currentMillis;
-    digitalWrite(RELAY_PIN, LOW);
-    leds[0] = CRGB(255, 0, 0);
-    FastLED.show();
-    isOn = false;
-    automatic = false;
-    std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
-    request->send(200, "application/json", String(json.c_str()));
-  });
-  server.on("/g;(n3AUTOMATYCZNY", HTTP_GET, [](AsyncWebServerRequest *request) {
-    previousMillis = 0UL;
-    automatic = true;
+  server.on("/api/control", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (request->arg("password") != getAuthPassword()) {
+      request->send(401, "application/json", "{\"status\":\"unauthorized\"}");
+      return;
+    }
+    String action = request->arg("action");
+    if (action == "WLACZ") {
+      digitalWrite(RELAY_PIN, HIGH);
+      leds[0] = CRGB(0, 255, 0);
+      FastLED.show();
+      previousMillis = currentMillis;
+      isOn = true;
+      automatic = false;
+    } else if (action == "WYLACZ") {
+      previousMillis = currentMillis;
+      digitalWrite(RELAY_PIN, LOW);
+      leds[0] = CRGB(255, 0, 0);
+      FastLED.show();
+      isOn = false;
+      automatic = false;
+    } else if (action == "AUTOMATYCZNY") {
+      previousMillis = 0UL;
+      automatic = true;
+    }
     std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
     request->send(200, "application/json", String(json.c_str()));
   });
@@ -273,8 +292,10 @@ void setup() {
   server.on("/api/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {
     String ssid = request->arg("ssid");
     String pass = request->arg("password");
+    String authPass = request->arg("auth_pass");
     if (ssid.length() > 0) {
       saveWifiCreds(ssid, pass);
+      if (authPass.length() > 0) setAuthPassword(authPass);
       request->send(200, "application/json", "{\"status\":\"ok\"}");
       WiFi.disconnect();
       WiFi.mode(WIFI_AP_STA);
@@ -298,6 +319,9 @@ void setup() {
   server.on("/api/wifi/disable-ap", HTTP_POST, [](AsyncWebServerRequest *request) {
     WiFi.softAPdisconnect(true);
     dnsServer.stop();
+    WiFi.mode(WIFI_STA);
+    configPortalActive = false;
+    apShutdownTime = 0;
     request->send(200, "application/json", "{\"status\":\"ok\"}");
   });
   server.onNotFound([](AsyncWebServerRequest *request) {
@@ -328,10 +352,7 @@ void loop() {
       if (status == WL_CONNECTED) {
         connectingToWifi = false;
         MDNS.begin("pompa");
-        WiFi.softAPdisconnect(true);
-        dnsServer.stop();
-        WiFi.mode(WIFI_STA);
-        configPortalActive = false;
+        apShutdownTime = millis() + 30000;
       } else if (status == WL_CONNECT_FAILED || millis() - connectStartTime > WIFI_TIMEOUT_MS) {
         connectingToWifi = false;
         WiFi.mode(WIFI_AP);
@@ -342,6 +363,14 @@ void loop() {
         dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
         dnsServer.start(53, "*", apIP);
       }
+    }
+
+    if (apShutdownTime > 0 && millis() > apShutdownTime) {
+      apShutdownTime = 0;
+      WiFi.softAPdisconnect(true);
+      dnsServer.stop();
+      WiFi.mode(WIFI_STA);
+      configPortalActive = false;
     }
 
     return;

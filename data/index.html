@@ -61,9 +61,30 @@ async function fetchStatus() {
 
 async function getAction(a) {
    try {
-       const r = await fetch(document.location.hash.substring(1) + a);
+       const r = await fetch('/api/control', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+           body: 'action=' + a + '&password=' + encodeURIComponent(localStorage.getItem('pompaPass') || '')
+       });
        if (r.ok) fetchStatus();
+       else if (r.status === 401) {
+           localStorage.removeItem('pompaPass');
+           location.reload();
+       }
    } catch (e) {}
+}
+
+async function checkAuth() {
+   const pw = localStorage.getItem('pompaPass');
+   if (!pw) return false;
+   try {
+       const r = await fetch('/api/auth', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+           body: 'password=' + encodeURIComponent(pw)
+       });
+       return r.ok;
+   } catch (e) { return false; }
 }
 
 async function fetchWifiStatus() {
@@ -161,16 +182,17 @@ async function submitWifi(event) {
    const select = document.getElementById('wifi-ssid-select');
    const manualInput = document.getElementById('wifi-ssid-manual');
    const ssid = select.value === '__other__' ? manualInput.value : select.value;
-   const password = document.getElementById('wifi-password').value;
-   const btn = document.getElementById('wifi-btn');
-   btn.disabled = true;
-   btn.textContent = 'Zapisywanie...';
-   try {
-       const r = await fetch('/api/wifi', {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-           body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password)
-       });
+    const password = document.getElementById('wifi-password').value;
+    const authPass = document.getElementById('wifi-auth-pass').value;
+    const btn = document.getElementById('wifi-btn');
+    btn.disabled = true;
+    btn.textContent = 'Zapisywanie...';
+    try {
+        const r = await fetch('/api/wifi', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password) + '&auth_pass=' + encodeURIComponent(authPass)
+        });
        if (r.ok) {
            document.getElementById('wifi-config').innerHTML =
                '<div class="card">' +
@@ -232,17 +254,36 @@ async function checkWifiConnection(ssid, attempt) {
 }
 
 (function () {
-   window.onload = () => {
-       if (document.location.hash.substring(1) === '') {
-           const b = document.getElementById('buttons');
-           if (b) b.style.display = 'none';
-       }
+   window.onload = async () => {
        setInterval(updateUptime, 1000);
        fetchStatus();
        setInterval(fetchStatus, 5000);
        fetchWifiStatus();
+       if (await checkAuth()) {
+           document.getElementById('buttons').style.display = 'block';
+           document.getElementById('unlock-btn').style.display = 'none';
+       }
    };
 })();
+
+async function unlock() {
+   const pw = prompt('Podaj hasło:');
+   if (!pw) return;
+   try {
+       const r = await fetch('/api/auth', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+           body: 'password=' + encodeURIComponent(pw)
+       });
+       if (r.ok) {
+           localStorage.setItem('pompaPass', pw);
+           document.getElementById('buttons').style.display = 'block';
+           document.getElementById('unlock-btn').style.display = 'none';
+       } else {
+           alert('Nieprawidłowe hasło');
+       }
+   } catch (e) { alert('Błąd połączenia'); }
+}
 </script>
 </head>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/purecss@3.0.0/build/pure-min.css" integrity="sha384-X38yfunGUhNzHpBaEBsWLO+A0HDYOQi8ufWDkZ0k9e0eXz/tH3II7uKZ9msv++Ls" crossorigin="anonymous">
@@ -314,15 +355,16 @@ body { text-align: center; margin: 0; padding: 16px; font-family: -apple-system,
 <h2 id='mode'>Tryb pracy automatyczny</h2>
 <h1 id='level'>Poziom wody 0 cm</h1>
 <div class="tank"><div id="water" class="water" style="height: 0%;"><div id="perc" class="perc">0%</div></div></div>
-<div id='buttons'>
+<div id="buttons" style="display:none">
 <div style="padding: 1em 0; width: 100%"><button style="background: rgb(28, 184, 65);" class="pure-button button-success" onclick="getAction('WLACZ')">ON</button></div>
 <div style="padding: 1em 0; width: 100%"><button style="background: rgb(202, 60, 60);" class="pure-button button-success" onclick="getAction('WYLACZ')">OFF</button></div>
 <div style="padding: 1em 0; width: 100%"><button class="pure-button pure-button-primary" onclick="getAction('AUTOMATYCZNY')">AUTO</button></div>
 </div>
-<p id='uptime'>Uptime: <b>0</b>d<b>0</b>h<b>0</b>m<b>0</b>s</p>
+<p id='uptime'></p>
 <span style="display: none" id="uptime-in-sec">0</span>
 <span style="display: none" id="auto-in-sec">0</span>
 <p id='auto-in'></p>
+<button id="unlock-btn" style="margin-top:16px;padding:10px 20px;border:1px solid #ccc;border-radius:8px;background:white;color:#333;font-size:0.95em;cursor:pointer" onclick="unlock()">🔒 Odblokuj sterowanie</button>
 </div>
 <div id="wifi-config">
 <div class="card">
@@ -342,6 +384,7 @@ body { text-align: center; margin: 0; padding: 16px; font-family: -apple-system,
 <button type="button" class="btn-secondary" onclick="showSelectAgain()">Wróć do listy</button>
 </div>
 <input id="wifi-password" type="password" placeholder="Hasło WiFi">
+<input id="wifi-auth-pass" type="password" placeholder="Hasło sterowania (admin)">
 <button id="wifi-btn" class="btn-primary" type="submit">Zapisz i uruchom ponownie</button>
 </form>
 </div>
