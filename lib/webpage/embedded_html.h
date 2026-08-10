@@ -388,7 +388,7 @@ body { text-align: center; margin: 0; padding: 16px; font-family: -apple-system,
 <button type="button" class="btn-secondary" onclick="showSelectAgain()">Wróć do listy</button>
 </div>
 <input id="wifi-password" type="password" placeholder="Hasło WiFi">
-<input id="wifi-auth-pass" type="password" placeholder="Hasło sterowania (admin)">
+<input id="wifi-auth-pass" type="password" placeholder="Hasło sterowania (dom. admin)">
 <button id="wifi-btn" class="btn-primary" type="submit">Zapisz i uruchom ponownie</button>
 </form>
 </div>
