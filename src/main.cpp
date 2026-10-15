@@ -43,7 +43,7 @@ bool automatic = true;
 unsigned long previousMillis = 0;
 unsigned long currentMillis = 0;
 bool isOn = false;
-const unsigned long goAutomaticAfter = 900000;
+unsigned long goAutomaticAfter = 900000UL;
 float voltageSum = 0;
 float avgVoltage = 0;
 float level = 0;
@@ -105,6 +105,20 @@ String getAuthPassword() {
 void setAuthPassword(const String& pw) {
   preferences.begin("app", false);
   preferences.putString("auth_pass", pw);
+  preferences.end();
+}
+
+unsigned long getAutoMinutes() {
+  preferences.begin("app", true);
+  unsigned long m = preferences.getULong("auto_min", 15UL);
+  preferences.end();
+  return m;
+}
+
+void setAutoMinutes(unsigned long minutes) {
+  goAutomaticAfter = minutes * 60000UL;
+  preferences.begin("app", false);
+  preferences.putULong("auto_min", minutes);
   preferences.end();
 }
 
@@ -254,6 +268,7 @@ void setup() {
   FastLED.setBrightness(50);
   pinMode(RELAY_PIN, OUTPUT);
   FastLED.show();
+  goAutomaticAfter = getAutoMinutes() * 60000UL;
 
   Serial.begin(9600);
   portalDebug("[boot] portal build (tls-redirect + logging)");
@@ -331,6 +346,11 @@ void setup() {
     } else if (action == "AUTOMATYCZNY") {
       previousMillis = 0UL;
       automatic = true;
+    } else if (action == "SETAUTO") {
+      long minutes = request->arg("minutes").toInt();
+      if (minutes == 15 || minutes == 30 || minutes == 45 || minutes == 60) {
+        setAutoMinutes(minutes);
+      }
     }
     std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
     request->send(200, "application/json", String(json.c_str()));

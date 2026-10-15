@@ -39,6 +39,8 @@ std::string Webpage::buildJson(bool isOn, float level, unsigned long currentMill
     json += std::to_string(allSeconds);
     json += ",\"autoInSec\":";
     json += std::to_string(autoInSec);
+    json += ",\"autoMin\":";
+    json += std::to_string(goAutomaticAfter / 60000UL);
     json += "}";
     return json;
 }
