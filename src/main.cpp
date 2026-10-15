@@ -9,6 +9,10 @@
 #include <FastLED.h>
 #include <Preferences.h>
 #include "embedded_html.h"
+#include "tls_redirect.h"
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #define NUM_LEDS 1
 #define DATA_PIN 48
@@ -49,6 +53,16 @@ Webpage page = Webpage();
 
 AsyncWebServer server(80);
 DNSServer dnsServer;
+TLSRedirectServer tlsRedirect;
+
+void tlsRedirectTask(void *param) {
+  for (;;) {
+    if (configPortalActive) {
+      tlsRedirect.handle();
+    }
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+  }
+}
 
 static const IPAddress apIP(192, 168, 4, 1);
 static const IPAddress subnet(255, 255, 255, 0);
@@ -154,8 +168,8 @@ void handleAutomaticMode() {
     } else {
       if (level <= 126) {
         digitalWrite(RELAY_PIN, LOW);
-        leds[0] = CRGB(255, 0, 0); 
-        FastLED.show(); 
+        leds[0] = CRGB(0, 0, 0);
+        FastLED.show();
         isOn = false;
       }
     }
@@ -206,10 +220,10 @@ void setup() {
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.setBrightness(50);
   pinMode(RELAY_PIN, OUTPUT);
-  leds[0] = CRGB(255, 0, 0); 
-  FastLED.show(); 
+  FastLED.show();
 
   Serial.begin(9600);
+  portalDebug("[boot] portal build (tls-redirect + logging)");
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
@@ -219,11 +233,25 @@ void setup() {
 
   initWiFi();
 
+  Serial.printf("[boot] mode=%d portal=%d sta=%s\n", WiFi.getMode(), configPortalActive,
+                WiFi.localIP().toString().c_str());
+  portalDebug("[boot] mode=%d portal=%d sta=%s", WiFi.getMode(), configPortalActive,
+              WiFi.localIP().toString().c_str());
+  if (configPortalActive) {
+    tlsRedirect.begin();
+  }
+  xTaskCreatePinnedToCore(tlsRedirectTask, "tlsRedirect", 16384, nullptr, 1, nullptr, 1);
+
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    portalDebug("[http] GET / from %s", request->client()->remoteIP().toString().c_str());
     request->send(200, "text/html; charset=utf-8", INDEX_HTML);
+  });
+  server.on("/api/debug", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", getPortalDebugLog());
   });
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
     std::string json = page.buildJson(isOn, level, currentMillis, previousMillis, automatic, goAutomaticAfter);
+    json.insert(json.size() - 1, ",\"ver\":3");
     request->send(200, "application/json", String(json.c_str()));
   });
   server.on("/api/auth", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -249,7 +277,7 @@ void setup() {
     } else if (action == "WYLACZ") {
       previousMillis = currentMillis;
       digitalWrite(RELAY_PIN, LOW);
-      leds[0] = CRGB(255, 0, 0);
+      leds[0] = CRGB(0, 0, 0);
       FastLED.show();
       isOn = false;
       automatic = false;
@@ -319,12 +347,15 @@ void setup() {
   server.on("/api/wifi/disable-ap", HTTP_POST, [](AsyncWebServerRequest *request) {
     WiFi.softAPdisconnect(true);
     dnsServer.stop();
+    tlsRedirect.stop();
     WiFi.mode(WIFI_STA);
     configPortalActive = false;
     apShutdownTime = 0;
     request->send(200, "application/json", "{\"status\":\"ok\"}");
   });
   server.onNotFound([](AsyncWebServerRequest *request) {
+    portalDebug("[http] %s %s from %s", request->methodToString(), request->url().c_str(),
+                request->client()->remoteIP().toString().c_str());
     if (configPortalActive) {
       request->redirect("http://192.168.4.1/");
     } else {
@@ -334,7 +365,13 @@ void setup() {
 
   server.begin();
 
-  ElegantOTA.begin(&server, "admin", "admin");
+  ElegantOTA.begin(&server, "4pd9zxvaq6", "ddaf8X1mFxGFpSZtYVMkNokl");
+  ElegantOTA.onStart([](){ portalDebug("[ota] start"); });
+  ElegantOTA.onProgress([](size_t cur, size_t tot){
+    static size_t last = 0;
+    if (cur - last > 200000) { last = cur; portalDebug("[ota] progress %u/%u", cur, tot); }
+  });
+  ElegantOTA.onEnd([](bool ok){ portalDebug("[ota] end ok=%d", ok); });
 }
 
 void loop() {
@@ -346,7 +383,12 @@ void loop() {
   if (configPortalActive) {
     dnsServer.processNextRequest();
     handleBlueBlink();
-
+    static unsigned long portalLogTimer = 0;
+    if (currentMillis - portalLogTimer > 3000) {
+      portalLogTimer = currentMillis;
+      portalDebug("[portal] active, sta_conn=%u, ip=%s",
+                  WiFi.softAPgetStationNum(), WiFi.softAPIP().toString().c_str());
+    }
     if (connectingToWifi) {
       wl_status_t status = WiFi.status();
       if (status == WL_CONNECTED) {
@@ -369,6 +411,7 @@ void loop() {
       apShutdownTime = 0;
       WiFi.softAPdisconnect(true);
       dnsServer.stop();
+      tlsRedirect.stop();
       WiFi.mode(WIFI_STA);
       configPortalActive = false;
     }
