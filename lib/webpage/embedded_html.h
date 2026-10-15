@@ -70,11 +70,12 @@ async function getAction(a) {
            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
            body: 'action=' + a + '&password=' + encodeURIComponent(localStorage.getItem('pompaPass') || '')
        });
-       if (r.ok) fetchStatus();
-       else if (r.status === 401) {
-           localStorage.removeItem('pompaPass');
-           location.reload();
-       }
+        if (r.ok) fetchStatus();
+        else if (r.status === 429) alert('Zbyt wiele prób. Odczekaj ok. 30 sekund.');
+        else if (r.status === 401) {
+            localStorage.removeItem('pompaPass');
+            location.reload();
+        }
    } catch (e) {}
 }
 
@@ -120,44 +121,46 @@ async function scanNetworks(retry) {
    spinner.style.display = 'flex';
    retryBtn.style.display = 'none';
    retry = retry || 0;
-   try {
-       const r = await fetch('/api/wifi/scan');
-       if (r.ok) {
-           const data = await r.json();
-           if (data.status === 'scanning') {
-               if (retry < 10) {
-                   setTimeout(() => scanNetworks(retry + 1), 1000);
-               } else {
-                    select.innerHTML = '<option value="">Skanowanie trwa zbyt długo</option>';
-                    spinner.style.display = 'none';
-                    select.disabled = false;
-                    retryBtn.style.display = 'block';
-                    manualGroup.style.display = 'block';
-                    manualInput.required = true;
-               }
-               return;
-           }
-            spinner.style.display = 'none';
-            select.innerHTML = '<option value="">-- Wybierz sieć --</option>';
-           const seen = new Set();
-           if (data.networks) {
-               data.networks.sort((a, b) => b.rssi - a.rssi);
-               for (const net of data.networks) {
-                   if (net.ssid === '' || seen.has(net.ssid)) continue;
-                   seen.add(net.ssid);
-                   const opt = document.createElement('option');
-                   opt.value = net.ssid;
-                   opt.textContent = net.ssid + ' (' + net.rssi + ' dBm)';
-                   select.appendChild(opt);
-               }
-           }
-           const other = document.createElement('option');
-           other.value = '__other__';
-           other.textContent = 'Inna...';
-           select.appendChild(other);
-           select.disabled = false;
-       }
-   } catch (e) {
+    try {
+        const r = await fetch('/api/wifi/scan?password=' + encodeURIComponent(localStorage.getItem('pompaPass') || document.getElementById('wifi-auth-pass').value || ''));
+        if (r.ok) {
+            const data = await r.json();
+            if (data.status === 'scanning') {
+                if (retry < 10) {
+                    setTimeout(() => scanNetworks(retry + 1), 1000);
+                } else {
+                     select.innerHTML = '<option value="">Skanowanie trwa zbyt długo</option>';
+                     spinner.style.display = 'none';
+                     select.disabled = false;
+                     retryBtn.style.display = 'block';
+                     manualGroup.style.display = 'block';
+                     manualInput.required = true;
+                }
+                return;
+            }
+             spinner.style.display = 'none';
+             select.innerHTML = '<option value="">-- Wybierz sieć --</option>';
+            const seen = new Set();
+            if (data.networks) {
+                data.networks.sort((a, b) => b.rssi - a.rssi);
+                for (const net of data.networks) {
+                    if (net.ssid === '' || seen.has(net.ssid)) continue;
+                    seen.add(net.ssid);
+                    const opt = document.createElement('option');
+                    opt.value = net.ssid;
+                    opt.textContent = net.ssid + ' (' + net.rssi + ' dBm)';
+                    select.appendChild(opt);
+                }
+            }
+            const other = document.createElement('option');
+            other.value = '__other__';
+            other.textContent = 'Inna...';
+            select.appendChild(other);
+            select.disabled = false;
+        } else {
+            throw new Error('http ' + r.status);
+        }
+    } catch (e) {
         select.innerHTML = '<option value="">Błąd skanowania</option>';
         spinner.style.display = 'none';
         select.disabled = false;
@@ -195,9 +198,10 @@ async function submitWifi(event) {
         const r = await fetch('/api/wifi', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password) + '&auth_pass=' + encodeURIComponent(authPass)
+            body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password) + '&auth_pass=' + encodeURIComponent(authPass) + '&ctrl_pass=' + encodeURIComponent(localStorage.getItem('pompaPass') || authPass)
         });
        if (r.ok) {
+           if (authPass) localStorage.setItem('pompaPass', authPass);
            document.getElementById('wifi-config').innerHTML =
                '<div class="card">' +
                '<h3 style="margin-top:0">Łączenie z siecią <b>' + ssid + '</b>...</h3>' +
@@ -228,7 +232,7 @@ async function checkWifiConnection(ssid, attempt) {
                document.getElementById('conn-status').textContent = 'Łączenie... (' + (attempt + 1) + 's)';
                checkWifiConnection(ssid, attempt + 1);
             } else if (data.connected) {
-                fetch('/api/wifi/disable-ap', { method: 'POST' }).catch(() => {});
+                 fetch('/api/wifi/disable-ap', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'password=' + encodeURIComponent(localStorage.getItem('pompaPass') || '') }).catch(() => {});
                 let countdown = 10;
                 document.getElementById('wifi-config').innerHTML =
                     '<div class="card">' +
@@ -279,13 +283,15 @@ async function unlock() {
            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
            body: 'password=' + encodeURIComponent(pw)
        });
-       if (r.ok) {
-           localStorage.setItem('pompaPass', pw);
-           document.getElementById('buttons').style.display = 'block';
-           document.getElementById('unlock-btn').style.display = 'none';
-       } else {
-           alert('Nieprawidłowe hasło');
-       }
+        if (r.ok) {
+            localStorage.setItem('pompaPass', pw);
+            document.getElementById('buttons').style.display = 'block';
+            document.getElementById('unlock-btn').style.display = 'none';
+        } else if (r.status === 429) {
+            alert('Zbyt wiele prób. Odczekaj ok. 30 sekund.');
+        } else {
+            alert('Nieprawidłowe hasło');
+        }
    } catch (e) { alert('Błąd połączenia'); }
 }
 </script>

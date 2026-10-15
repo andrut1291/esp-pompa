@@ -108,6 +108,39 @@ void setAuthPassword(const String& pw) {
   preferences.end();
 }
 
+const unsigned int MAX_AUTH_ATTEMPTS = 5;
+const unsigned long AUTH_LOCKOUT_MS = 30000;
+unsigned int failedAuthAttempts = 0;
+unsigned long lastAuthFailMs = 0;
+
+bool authLocked() {
+  return failedAuthAttempts >= MAX_AUTH_ATTEMPTS && (millis() - lastAuthFailMs) < AUTH_LOCKOUT_MS;
+}
+
+void noteAuthFailure() {
+  if (failedAuthAttempts < 1000) failedAuthAttempts++;
+  lastAuthFailMs = millis();
+}
+
+void noteAuthSuccess() {
+  failedAuthAttempts = 0;
+  lastAuthFailMs = 0;
+}
+
+bool checkCtrlPassword(const String& pass) {
+  if (pass.length() == 0) return false;
+  if (pass == getAuthPassword()) {
+    noteAuthSuccess();
+    return true;
+  }
+  noteAuthFailure();
+  return false;
+}
+
+bool wifiConfigured() {
+  return getSavedSsid().length() > 0;
+}
+
 void initWiFi() {
   String ssid = getSavedSsid();
   String pass = getSavedPass();
@@ -247,6 +280,10 @@ void setup() {
     request->send(200, "text/html; charset=utf-8", INDEX_HTML);
   });
   server.on("/api/debug", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->arg("password") != getAuthPassword()) {
+      request->send(401, "text/plain", "unauthorized");
+      return;
+    }
     request->send(200, "text/plain", getPortalDebugLog());
   });
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -255,14 +292,24 @@ void setup() {
     request->send(200, "application/json", String(json.c_str()));
   });
   server.on("/api/auth", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (authLocked()) {
+      request->send(429, "application/json", "{\"status\":\"too_many_attempts\"}");
+      return;
+    }
     if (request->arg("password") == getAuthPassword()) {
+      noteAuthSuccess();
       request->send(200, "application/json", "{\"status\":\"ok\"}");
     } else {
+      noteAuthFailure();
       request->send(401, "application/json", "{\"status\":\"error\"}");
     }
   });
   server.on("/api/control", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (request->arg("password") != getAuthPassword()) {
+    if (authLocked()) {
+      request->send(429, "application/json", "{\"status\":\"too_many_attempts\"}");
+      return;
+    }
+    if (!checkCtrlPassword(request->arg("password"))) {
       request->send(401, "application/json", "{\"status\":\"unauthorized\"}");
       return;
     }
@@ -289,6 +336,10 @@ void setup() {
     request->send(200, "application/json", String(json.c_str()));
   });
   server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (wifiConfigured() && !checkCtrlPassword(request->arg("password"))) {
+      request->send(401, "application/json", "{\"status\":\"unauthorized\"}");
+      return;
+    }
     static bool scanActive = false;
     int n = WiFi.scanComplete();
     if (n == WIFI_SCAN_RUNNING) {
@@ -318,6 +369,10 @@ void setup() {
     request->send(200, "application/json", "{\"status\":\"scanning\"}");
   });
   server.on("/api/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (wifiConfigured() && !checkCtrlPassword(request->arg("ctrl_pass"))) {
+      request->send(401, "application/json", "{\"status\":\"unauthorized\"}");
+      return;
+    }
     String ssid = request->arg("ssid");
     String pass = request->arg("password");
     String authPass = request->arg("auth_pass");
@@ -345,6 +400,10 @@ void setup() {
     request->send(200, "application/json", json);
   });
   server.on("/api/wifi/disable-ap", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!checkCtrlPassword(request->arg("password"))) {
+      request->send(401, "application/json", "{\"status\":\"unauthorized\"}");
+      return;
+    }
     WiFi.softAPdisconnect(true);
     dnsServer.stop();
     tlsRedirect.stop();
