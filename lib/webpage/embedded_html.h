@@ -53,6 +53,7 @@ function updateUI(data) {
    document.getElementById('perc').textContent = data.perc + '%';
    document.getElementById('auto-in-sec').textContent = data.autoInSec;
    setAutoInterval(data.autoInSec);
+   updateAutoLabel(data.autoMin);
    uptimeCount = data.uptime;
 }
 
@@ -70,13 +71,46 @@ async function getAction(a) {
            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
            body: 'action=' + a + '&password=' + encodeURIComponent(localStorage.getItem('pompaPass') || '')
        });
-        if (r.ok) fetchStatus();
-        else if (r.status === 429) alert('Zbyt wiele prób. Odczekaj ok. 30 sekund.');
-        else if (r.status === 401) {
-            localStorage.removeItem('pompaPass');
-            location.reload();
-        }
+       if (r.ok) fetchStatus();
+       else if (r.status === 429) alert('Zbyt wiele prób. Odczekaj ok. 30 sekund.');
+       else if (r.status === 401) {
+           localStorage.removeItem('pompaPass');
+           location.reload();
+       }
    } catch (e) {}
+}
+
+async function setAutoMinutes(min, e) {
+   e.stopPropagation();
+   document.getElementById('auto-menu').style.display = 'none';
+   try {
+       const r = await fetch('/api/control', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+           body: 'action=SETAUTO&minutes=' + min + '&password=' + encodeURIComponent(localStorage.getItem('pompaPass') || '')
+       });
+       if (r.ok) fetchStatus();
+       else if (r.status === 429) alert('Zbyt wiele prób. Odczekaj ok. 30 sekund.');
+       else if (r.status === 401) {
+           localStorage.removeItem('pompaPass');
+           location.reload();
+       }
+   } catch (err) {}
+}
+
+function toggleAutoMenu(e) {
+   e.stopPropagation();
+   const m = document.getElementById('auto-menu');
+   m.style.display = (m.style.display === 'block') ? 'none' : 'block';
+}
+
+function updateAutoLabel(autoMin) {
+   document.getElementById('auto-btn').textContent = 'Auto ' + autoMin + 'm';
+   document.querySelectorAll('#auto-menu .auto-opt').forEach(el => {
+       const m = parseInt(el.dataset.min);
+       el.textContent = (m === autoMin ? '✓ ' : '') + m + ' min';
+       el.style.fontWeight = (m === autoMin) ? '700' : '400';
+   });
 }
 
 async function checkAuth() {
@@ -267,6 +301,9 @@ async function checkWifiConnection(ssid, attempt) {
        fetchStatus();
        setInterval(fetchStatus, 5000);
        fetchWifiStatus();
+       document.addEventListener('click', () => {
+           document.getElementById('auto-menu').style.display = 'none';
+       });
        if (await checkAuth()) {
            document.getElementById('buttons').style.display = 'block';
            document.getElementById('unlock-btn').style.display = 'none';
@@ -358,6 +395,9 @@ body { text-align: center; margin: 0; padding: 16px; font-family: -apple-system,
    background: white; color: #333; font-size: 0.9em; cursor: pointer; margin: 4px 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.auto-opt { padding: 12px 16px; cursor: pointer; font-size: 1em; }
+.auto-opt:hover { background: #f0f0f0; }
+#auto-menu .auto-opt + .auto-opt { border-top: 1px solid #eee; }
 </style>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <div id="main-content">
@@ -366,9 +406,20 @@ body { text-align: center; margin: 0; padding: 16px; font-family: -apple-system,
 <h1 id='level'>Poziom wody 0 cm</h1>
 <div class="tank"><div id="water" class="water" style="height: 0%;"><div id="perc" class="perc">0%</div></div></div>
 <div id="buttons" style="display:none">
-<div style="padding: 1em 0; width: 100%"><button style="background: rgb(28, 184, 65);" class="pure-button button-success" onclick="getAction('WLACZ')">ON</button></div>
-<div style="padding: 1em 0; width: 100%"><button style="background: rgb(202, 60, 60);" class="pure-button button-success" onclick="getAction('WYLACZ')">OFF</button></div>
-<div style="padding: 1em 0; width: 100%"><button class="pure-button pure-button-primary" onclick="getAction('AUTOMATYCZNY')">AUTO</button></div>
+<div style="padding: 1em 0; width: fit-content; margin: 0 auto"><button style="background: rgb(28, 184, 65);" class="pure-button button-success" onclick="getAction('WLACZ')">ON</button></div>
+<div style="padding: 1em 0; width: fit-content; margin: 0 auto"><button style="background: rgb(202, 60, 60);" class="pure-button button-success" onclick="getAction('WYLACZ')">OFF</button></div>
+<div style="padding: 1em 0; position: relative; width: fit-content; margin: 0 auto">
+<div style="display: inline-flex">
+<button id="auto-btn" style="border-radius: 4px 0 0 4px" class="pure-button pure-button-primary" onclick="getAction('AUTOMATYCZNY')">Auto 15m</button>
+<button id="auto-arrow" style="width: 40px; padding: 0 10px; border-radius: 0 4px 4px 0; font-size: 0.9em" class="pure-button pure-button-primary" onclick="toggleAutoMenu(event)">▾</button>
+</div>
+<div id="auto-menu" style="display: none; position: absolute; left: 0; top: 100%; min-width: 140px; z-index: 50; background: white; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15)">
+<div class="auto-opt" data-min="15" onclick="setAutoMinutes(15, event)">15 min</div>
+<div class="auto-opt" data-min="30" onclick="setAutoMinutes(30, event)">30 min</div>
+<div class="auto-opt" data-min="45" onclick="setAutoMinutes(45, event)">45 min</div>
+<div class="auto-opt" data-min="60" onclick="setAutoMinutes(60, event)">60 min</div>
+</div>
+</div>
 </div>
 <p id='uptime'></p>
 <span style="display: none" id="uptime-in-sec">0</span>
