@@ -45,7 +45,9 @@ function updateUI(data) {
     document.getElementById('state').textContent = data.isOn ? 'Obecny stan - załączony' : 'Obecny stan - wyłączony';
    document.getElementById('mode').textContent = data.automatic ? 'Tryb pracy automatyczny' : 'Tryb pracy manualny';
    document.getElementById('level').innerHTML = 'Poziom wody ' + data.level + ' cm';
-   document.getElementById('water').style.height = data.perc + '%';
+   const water = document.getElementById('water');
+   water.style.height = data.perc + '%';
+   water.style.display = data.perc > 0 ? 'block' : 'none';
    document.getElementById('perc').textContent = data.perc + '%';
    document.getElementById('auto-in-sec').textContent = data.autoInSec;
    setAutoInterval(data.autoInSec);
@@ -124,7 +126,7 @@ async function checkAuth() {
 
 async function fetchWifiStatus() {
    try {
-       const r = await fetch('/api/wifi/status');
+       const r = await fetch('/api/wifi/status?password=' + encodeURIComponent(localStorage.getItem('pompaPass') || ''));
        if (r.ok) {
            const data = await r.json();
            if (data.configured && data.connected) {
@@ -136,6 +138,9 @@ async function fetchWifiStatus() {
                document.getElementById('wifi-ap-name').textContent = 'ESP-Pompa';
                scanNetworks();
            }
+       } else if (r.status === 401) {
+           document.getElementById('main-content').style.display = 'block';
+           document.getElementById('wifi-config').style.display = 'none';
        }
    } catch (e) {}
 }
@@ -348,20 +353,20 @@ body { text-align: center; margin: 0; padding: 16px; font-family: -apple-system,
    font-weight: bold; color: black; padding-top: 20px; text-shadow: 1px 1px 2px white;
 }
 @keyframes wave {
-   0% { transform: translateX(0) rotate(0deg); }
-   50% { transform: translateX(-25%) rotate(6deg); }
-   100% { transform: translateX(0) rotate(0deg); }
+   0% { transform: translateX(0) rotate(1.5deg); }
+   50% { transform: translateX(-25%) rotate(-1.5deg); }
+   100% { transform: translateX(0) rotate(1.5deg); }
 }
 .tank .water::before,
 .tank .water::after {
-   content: ''; position: absolute; width: 200%; height: 15px;
-   background-color: #f5f5f5; left: -50%; top: -10px;
+   content: ''; position: absolute; width: 200%; height: 16px;
+   background-color: #64b5f6; left: -50%; top: -8px;
    border-radius: 45%; animation: wave 5s linear infinite;
    z-index: 10;
 }
 .tank .water::after {
-   height: 25px; top: -15px; border-radius: 40%;
-   background-color: #f5f5f5;
+   height: 22px; top: -11px; border-radius: 40%;
+   background-color: #64b5f6;
    animation-duration: 7s; animation-direction: reverse; z-index: 9;
 }
 #wifi-config { margin: 0 auto; max-width: 420px; display: none; }
