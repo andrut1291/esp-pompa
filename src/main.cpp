@@ -10,6 +10,11 @@
 #include <Preferences.h>
 #include "embedded_html.h"
 #include "tls_redirect.h"
+#include "secrets.h"
+
+#ifndef ELEGANT_OTA_USER
+#error "Missing include/secrets.h - copy include/secrets.h.example to include/secrets.h and fill it in"
+#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -25,11 +30,17 @@ CRGB leds[NUM_LEDS];
 #define DEBOUNCE_MS 30
 #define AP_SSID "ESP-Pompa / 192.168.4.1"
 #define WIFI_TIMEOUT_MS 10000
+#define WIFI_RETRY_INTERVAL_MS 30000UL   // retry the saved network this often
+#define STA_DOWN_PORTAL_MS 300000UL      // reopen the setup AP after 5 min without WiFi
+#define BOOT_RESET_HOLD_MS 2000UL        // hold button this long to wipe credentials
+#define SAMPLE_INTERVAL_MS 100UL
 
 bool configPortalActive = false;
 bool connectingToWifi = false;
 unsigned long connectStartTime = 0;
 unsigned long apShutdownTime = 0;
+unsigned long wifiRetryTimer = 0;
+unsigned long staDownSince = 0;
 Preferences preferences;
 
 unsigned long lastPressTime = 0;
@@ -49,6 +60,9 @@ float avgVoltage = 0;
 float level = 0;
 float voltages[SIZE] = {0};
 int i = 0;
+int sampleCount = 0;
+unsigned long lastSampleMillis = 0;
+unsigned long lastSensorLog = 0;
 Webpage page = Webpage();
 
 AsyncWebServer server(80);
@@ -155,6 +169,30 @@ bool wifiConfigured() {
   return getSavedSsid().length() > 0;
 }
 
+// Bring the setup AP up without killing the STA interface: the board keeps
+// retrying the saved network in the background and leaves the portal as soon
+// as it connects (this is what makes it recover after a power cut, when the
+// router is still booting while the ESP32 is already up).
+void startPortalAp() {
+  if (configPortalActive) return;
+
+  portalDebug("[portal] starting setup AP");
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAPConfig(apIP, apIP, subnet);
+  WiFi.softAP(AP_SSID);
+  delay(100);
+  MDNS.begin("pompa");
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer.start(53, "*", apIP);
+  tlsRedirect.begin();
+
+  configPortalActive = true;
+  connectingToWifi = false;
+  apShutdownTime = 0;
+  wifiRetryTimer = millis();
+  portalDebug("[portal] AP up at http://%s/", apIP.toString().c_str());
+}
+
 void initWiFi() {
   String ssid = getSavedSsid();
   String pass = getSavedPass();
@@ -167,37 +205,72 @@ void initWiFi() {
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
       delay(100);
     }
+    wifiRetryTimer = millis();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println(WiFi.localIP());
+    portalDebug("[wifi] STA connected at %s", WiFi.localIP().toString().c_str());
     MDNS.begin("pompa");
   } else {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAPConfig(apIP, apIP, subnet);
-    WiFi.softAP(AP_SSID);
-    delay(100);
-    MDNS.begin("pompa");
-    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-    dnsServer.start(53, "*", apIP);
-    configPortalActive = true;
-    Serial.print("AP mode: ESP-Pompa @ ");
-    Serial.println(apIP);
+    startPortalAp();
   }
 }
 
 void handleAnalogReading() {
+  if (currentMillis - lastSampleMillis < SAMPLE_INTERVAL_MS) return;
+  lastSampleMillis = currentMillis;
+
   int sensorValue = analogRead(A0);
-  Serial.println("sensorValue: ");
-  Serial.print(sensorValue);
   float voltage = sensorValue * (5 / 4095.0);
   voltageSum = voltageSum - voltages[i] + voltage;
   voltages[i] = voltage;
-  avgVoltage = voltageSum / SIZE;
+  if (sampleCount < SIZE) sampleCount++;
+  avgVoltage = voltageSum / sampleCount;
   level = (avgVoltage * 200.0) / 5;
   i++;
   if (i >= SIZE) {
     i = 0;
+  }
+
+  // Log once per second instead of hammering the 9600 baud console on every
+  // sample (it blocks the loop and makes the portal feel unresponsive).
+  if (currentMillis - lastSensorLog >= 1000) {
+    lastSensorLog = currentMillis;
+    portalDebug("[adc] raw=%d level=%.0f", sensorValue, level);
+  }
+}
+
+// Keep the STA link alive after boot. A router reboot or a short power dip no
+// longer leaves the device stranded: it retries the saved network and, if the
+// network is gone for good, reopens the setup AP so it can be reconfigured.
+void handleWifiMaintenance() {
+  if (configPortalActive) return;
+
+  if (!wifiConfigured()) {
+    startPortalAp();
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    staDownSince = 0;
+    return;
+  }
+
+  if (staDownSince == 0) staDownSince = currentMillis;
+
+  if (currentMillis - wifiRetryTimer >= WIFI_RETRY_INTERVAL_MS) {
+    wifiRetryTimer = currentMillis;
+    portalDebug("[wifi] link down, retrying '%s'", getSavedSsid().c_str());
+    WiFi.disconnect();
+    WiFi.begin(getSavedSsid().c_str(), getSavedPass().c_str());
+  }
+
+  if (currentMillis - staDownSince >= STA_DOWN_PORTAL_MS) {
+    portalDebug("[wifi] no network for %lu s, reopening setup AP",
+                (unsigned long)(STA_DOWN_PORTAL_MS / 1000));
+    staDownSince = 0;
+    startPortalAp();
   }
 }
 
@@ -206,20 +279,20 @@ void handleAutomaticMode() {
   if ((automatic == false) && (diff) >= goAutomaticAfter) {
     automatic = true;
   }
-  if (automatic) {
-    if (level > 130) {
-      digitalWrite(RELAY_PIN, HIGH);
-      leds[0] = CRGB(0, 255, 0); 
-      FastLED.show(); 
-      isOn = true;
-    } else {
-      if (level <= 126) {
-        digitalWrite(RELAY_PIN, LOW);
-        leds[0] = CRGB(0, 0, 0);
-        FastLED.show();
-        isOn = false;
-      }
-    }
+  if (!automatic) return;
+
+  // Only touch the relay/LED on state changes: this runs on every loop pass and
+  // used to refresh the LED thousands of times per second.
+  if (level > 130 && !isOn) {
+    digitalWrite(RELAY_PIN, HIGH);
+    leds[0] = CRGB(0, 255, 0);
+    FastLED.show();
+    isOn = true;
+  } else if (level <= 126 && isOn) {
+    digitalWrite(RELAY_PIN, LOW);
+    leds[0] = CRGB(0, 0, 0);
+    FastLED.show();
+    isOn = false;
   }
 }
 
@@ -267,6 +340,7 @@ void setup() {
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.setBrightness(50);
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
   FastLED.show();
   goAutomaticAfter = getAutoMinutes() * 60000UL;
 
@@ -274,9 +348,24 @@ void setup() {
   portalDebug("[boot] portal build (tls-redirect + logging)");
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  // Only wipe the credentials when the button is deliberately held. A single
+  // glitchy read during a brown-out used to erase the saved WiFi and leave the
+  // device stuck in AP mode after every power loss.
   if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-    clearWifiCreds();
-    delay(100);
+    unsigned long holdStart = millis();
+    bool held = true;
+    while (millis() - holdStart < BOOT_RESET_HOLD_MS) {
+      if (digitalRead(BOOT_BUTTON_PIN) != LOW) {
+        held = false;
+        break;
+      }
+      delay(20);
+    }
+    if (held) {
+      portalDebug("[boot] reset button held, clearing WiFi credentials");
+      clearWifiCreds();
+      delay(100);
+    }
   }
 
   initWiFi();
@@ -285,9 +374,6 @@ void setup() {
                 WiFi.localIP().toString().c_str());
   portalDebug("[boot] mode=%d portal=%d sta=%s", WiFi.getMode(), configPortalActive,
               WiFi.localIP().toString().c_str());
-  if (configPortalActive) {
-    tlsRedirect.begin();
-  }
   xTaskCreatePinnedToCore(tlsRedirectTask, "tlsRedirect", 16384, nullptr, 1, nullptr, 1);
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -411,6 +497,10 @@ void setup() {
     }
   });
   server.on("/api/wifi/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (wifiConfigured() && !checkCtrlPassword(request->arg("password"))) {
+      request->send(401, "application/json", "{\"status\":\"unauthorized\"}");
+      return;
+    }
     String savedSsid = getSavedSsid();
     String json = "{\"configured\":" + String(savedSsid.length() > 0 ? "true" : "false") +
                   ",\"ssid\":\"" + savedSsid + "\"" +
@@ -430,6 +520,8 @@ void setup() {
     WiFi.mode(WIFI_STA);
     configPortalActive = false;
     apShutdownTime = 0;
+    staDownSince = 0;
+    wifiRetryTimer = millis();
     request->send(200, "application/json", "{\"status\":\"ok\"}");
   });
   server.onNotFound([](AsyncWebServerRequest *request) {
@@ -444,7 +536,7 @@ void setup() {
 
   server.begin();
 
-  ElegantOTA.begin(&server, "REDACTED_OTA_USER", "REDACTED_OTA_PASS");
+  ElegantOTA.begin(&server, ELEGANT_OTA_USER, ELEGANT_OTA_PASS);
   ElegantOTA.onStart([](){ portalDebug("[ota] start"); });
   ElegantOTA.onProgress([](size_t cur, size_t tot){
     static size_t last = 0;
@@ -459,9 +551,17 @@ void loop() {
 
   handleBootButton();
 
+  // Pump control must keep running in setup-AP mode too, otherwise the device
+  // stops watering until it is manually reconfigured.
+  handleAnalogReading();
+  handleAutomaticMode();
+  handleWifiMaintenance();
+
   if (configPortalActive) {
     dnsServer.processNextRequest();
-    handleBlueBlink();
+    if (!isOn) {
+      handleBlueBlink();
+    }
     static unsigned long portalLogTimer = 0;
     if (currentMillis - portalLogTimer > 3000) {
       portalLogTimer = currentMillis;
@@ -474,16 +574,24 @@ void loop() {
         connectingToWifi = false;
         MDNS.begin("pompa");
         apShutdownTime = millis() + 30000;
+        portalDebug("[wifi] connected to '%s', closing portal in 30s", getSavedSsid().c_str());
       } else if (status == WL_CONNECT_FAILED || millis() - connectStartTime > WIFI_TIMEOUT_MS) {
+        // Keep the AP up (and running in AP_STA) so the next attempt can
+        // happen without kicking off the client that is configuring us.
         connectingToWifi = false;
-        WiFi.mode(WIFI_AP);
-        WiFi.softAPConfig(apIP, apIP, subnet);
-        WiFi.softAP(AP_SSID);
-        delay(100);
-        MDNS.begin("pompa");
-        dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-        dnsServer.start(53, "*", apIP);
+        wifiRetryTimer = millis();
+        portalDebug("[wifi] connect failed, retrying in %lu s",
+                    (unsigned long)(WIFI_RETRY_INTERVAL_MS / 1000));
       }
+    } else if (wifiConfigured() && WiFi.status() != WL_CONNECTED &&
+               millis() - wifiRetryTimer >= WIFI_RETRY_INTERVAL_MS) {
+      // Router came back late (typical after a power cut) - join it now.
+      wifiRetryTimer = millis();
+      portalDebug("[wifi] retrying saved network '%s'", getSavedSsid().c_str());
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.begin(getSavedSsid().c_str(), getSavedPass().c_str());
+      connectingToWifi = true;
+      connectStartTime = millis();
     }
 
     if (apShutdownTime > 0 && millis() > apShutdownTime) {
@@ -493,11 +601,11 @@ void loop() {
       tlsRedirect.stop();
       WiFi.mode(WIFI_STA);
       configPortalActive = false;
+      staDownSince = 0;
+      wifiRetryTimer = millis();
+      portalDebug("[portal] STA online, setup AP closed");
     }
 
     return;
   }
-
-  handleAnalogReading();
-  handleAutomaticMode();
 }
