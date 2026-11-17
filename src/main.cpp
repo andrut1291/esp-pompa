@@ -81,59 +81,106 @@ void tlsRedirectTask(void *param) {
 static const IPAddress apIP(192, 168, 4, 1);
 static const IPAddress subnet(255, 255, 255, 0);
 
+// The Preferences object is a single shared handle: the web handlers run in the
+// AsyncTCP task while WiFi retries run in the Arduino loop task. Calling
+// begin()/end() from both at once closes the handle under the other task's feet
+// and makes reads silently fall back to their defaults (e.g. the auth password
+// becoming "admin"). Serialise every access, and keep the WiFi credentials in
+// RAM so the loop never needs NVS at all.
+static SemaphoreHandle_t prefsMutex = nullptr;
+
+void prefsLock() {
+  if (prefsMutex) xSemaphoreTake(prefsMutex, portMAX_DELAY);
+}
+
+void prefsUnlock() {
+  if (prefsMutex) xSemaphoreGive(prefsMutex);
+}
+
+String cachedSsid;
+String cachedPass;
+
+String getSavedSsid();
+String getSavedPass();
+
+void loadWifiCredsCache() {
+  cachedSsid = getSavedSsid();
+  cachedPass = getSavedPass();
+}
+
 void saveWifiCreds(const String& ssid, const String& pass) {
+  prefsLock();
   preferences.begin("wifi", false);
   preferences.putString("ssid", ssid);
   preferences.putString("pass", pass);
   preferences.end();
+  prefsUnlock();
+  cachedSsid = ssid;
+  cachedPass = pass;
 }
 
 void clearWifiCreds() {
+  prefsLock();
   preferences.begin("wifi", false);
   preferences.remove("ssid");
   preferences.remove("pass");
   preferences.end();
+  prefsUnlock();
+  cachedSsid = "";
+  cachedPass = "";
 }
 
 String getSavedSsid() {
+  prefsLock();
   preferences.begin("wifi", true);
   String s = preferences.getString("ssid", "");
   preferences.end();
+  prefsUnlock();
   return s;
 }
 
 String getSavedPass() {
+  prefsLock();
   preferences.begin("wifi", true);
   String p = preferences.getString("pass", "");
   preferences.end();
+  prefsUnlock();
   return p;
 }
 
 String getAuthPassword() {
+  prefsLock();
   preferences.begin("app", true);
   String p = preferences.getString("auth_pass", "admin");
   preferences.end();
+  prefsUnlock();
   return p;
 }
 
 void setAuthPassword(const String& pw) {
+  prefsLock();
   preferences.begin("app", false);
   preferences.putString("auth_pass", pw);
   preferences.end();
+  prefsUnlock();
 }
 
 unsigned long getAutoMinutes() {
+  prefsLock();
   preferences.begin("app", true);
   unsigned long m = preferences.getULong("auto_min", 15UL);
   preferences.end();
+  prefsUnlock();
   return m;
 }
 
 void setAutoMinutes(unsigned long minutes) {
   goAutomaticAfter = minutes * 60000UL;
+  prefsLock();
   preferences.begin("app", false);
   preferences.putULong("auto_min", minutes);
   preferences.end();
+  prefsUnlock();
 }
 
 const unsigned int MAX_AUTH_ATTEMPTS = 5;
@@ -166,7 +213,7 @@ bool checkCtrlPassword(const String& pass) {
 }
 
 bool wifiConfigured() {
-  return getSavedSsid().length() > 0;
+  return cachedSsid.length() > 0;
 }
 
 // Bring the setup AP up without killing the STA interface: the board keeps
@@ -194,12 +241,9 @@ void startPortalAp() {
 }
 
 void initWiFi() {
-  String ssid = getSavedSsid();
-  String pass = getSavedPass();
-
-  if (ssid.length() > 0) {
+  if (cachedSsid.length() > 0) {
     WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), pass.c_str());
+    WiFi.begin(cachedSsid.c_str(), cachedPass.c_str());
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
@@ -261,9 +305,9 @@ void handleWifiMaintenance() {
 
   if (currentMillis - wifiRetryTimer >= WIFI_RETRY_INTERVAL_MS) {
     wifiRetryTimer = currentMillis;
-    portalDebug("[wifi] link down, retrying '%s'", getSavedSsid().c_str());
+    portalDebug("[wifi] link down, retrying '%s'", cachedSsid.c_str());
     WiFi.disconnect();
-    WiFi.begin(getSavedSsid().c_str(), getSavedPass().c_str());
+    WiFi.begin(cachedSsid.c_str(), cachedPass.c_str());
   }
 
   if (currentMillis - staDownSince >= STA_DOWN_PORTAL_MS) {
@@ -342,6 +386,9 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
   FastLED.show();
+
+  prefsMutex = xSemaphoreCreateMutex();
+  loadWifiCredsCache();
   goAutomaticAfter = getAutoMinutes() * 60000UL;
 
   Serial.begin(9600);
@@ -501,7 +548,7 @@ void setup() {
       request->send(401, "application/json", "{\"status\":\"unauthorized\"}");
       return;
     }
-    String savedSsid = getSavedSsid();
+    String savedSsid = cachedSsid;
     String json = "{\"configured\":" + String(savedSsid.length() > 0 ? "true" : "false") +
                   ",\"ssid\":\"" + savedSsid + "\"" +
                   ",\"connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") +
@@ -587,9 +634,9 @@ void loop() {
                millis() - wifiRetryTimer >= WIFI_RETRY_INTERVAL_MS) {
       // Router came back late (typical after a power cut) - join it now.
       wifiRetryTimer = millis();
-      portalDebug("[wifi] retrying saved network '%s'", getSavedSsid().c_str());
+      portalDebug("[wifi] retrying saved network '%s'", cachedSsid.c_str());
       WiFi.mode(WIFI_AP_STA);
-      WiFi.begin(getSavedSsid().c_str(), getSavedPass().c_str());
+      WiFi.begin(cachedSsid.c_str(), cachedPass.c_str());
       connectingToWifi = true;
       connectStartTime = millis();
     }
